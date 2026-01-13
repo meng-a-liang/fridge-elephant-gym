@@ -1,13 +1,3 @@
-# demo.py 完整修改后代码
-import sys
-import os
-
-# 关键：把项目根目录加入Python搜索路径（解决ModuleNotFoundError）
-# 项目根目录 = demo.py所在目录的上一级（examples/ → fridge-elephant-gym/）
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(PROJECT_ROOT)
-
-# 现在再导入就不会报错了
 from fridge_gym import FridgeGameEnv
 import pygame
 

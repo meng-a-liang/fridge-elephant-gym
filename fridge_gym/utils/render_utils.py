@@ -18,9 +18,9 @@ def draw_with_shadow(surface, pos, screen):
     screen.blit(surface, pos)
 
 
-def scale_bg():
-    return None
-
-
-def draw_with_shadow():
-    return None
+# def scale_bg():
+#     return None
+#
+#
+# def draw_with_shadow():
+#     return None
