@@ -1,0 +1,23 @@
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Pygame临时文件
+*.png
+*.ttc
+*.jpg
+*.jpeg
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+*.log
+
+# IDE配置
+.idea/
+.vscode/
+*.swp
