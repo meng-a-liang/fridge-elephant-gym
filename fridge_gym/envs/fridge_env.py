@@ -1,9 +1,28 @@
+"""
+fridge_env.py
+=================
+这个文件定义了“把大象装进冰箱”的强化学习环境（Environment）。
+
+对零基础来说，你只要先记住一句话：
+- **环境（Env）**：负责“告诉智能体现在是什么状态（state/observation）”、接收智能体的动作（action），
+  然后返回“新状态 + 奖励reward + 是否结束done”。
+
+本项目里，我们保留了pygame可视化窗口，让你既能手动按键玩，也能让智能体自动执行，
+从而更直观地理解“强化学习 = 试错 + 奖励反馈”的结构。
+"""
+
 import os
 import pygame
 import sys
-import gymnasium as gym
-from gymnasium import spaces
 import numpy as np
+
+# 兼容导入：优先使用 gymnasium；如果用户只安装了 gym，也能运行（接口仍按Gymnasium风格返回）
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+except ModuleNotFoundError:  # pragma: no cover
+    import gym  # type: ignore
+    from gym import spaces  # type: ignore
 
 from fridge_gym.elements.fridge import Fridge
 from fridge_gym.elements.elephant import Elephant
@@ -11,7 +30,14 @@ from fridge_gym.utils.render_utils import draw_with_shadow
 
 
 class FridgeGameEnv(gym.Env):
-    """符合Gymnasium规范的强化学习环境（简洁文字版）"""
+    """
+    符合Gymnasium规范的强化学习环境（支持pygame渲染）。
+
+    ### 你将会在这里看到强化学习的“三要素”
+    - **状态/观测 observation**：`_get_obs()` 返回给智能体
+    - **动作 action**：`step(action)` 接收智能体动作
+    - **奖励 reward**：`step` 里根据动作是否有效、是否推进任务给出奖励
+    """
     metadata = {"render_modes": ["human"], "render_fps": 30}
     # 窗口尺寸
     DEFAULT_SCREEN_WIDTH = 1200
@@ -19,7 +45,21 @@ class FridgeGameEnv(gym.Env):
     FRIDGE_SIZE = (200, 180)
     ELEPHANT_SIZE = (100, 100)
     FRIDGE_INIT_Y_OFFSET = 150
-    ELEPHANT_MOVE_STEP = 5
+
+    # -----------------------------
+    # 以“米”为单位的可配置参数
+    # -----------------------------
+    # 为了让“0.8米、0.4米步长”这种需求更直观，我们引入一个简单的比例：
+    # 1米 ≈ PIXELS_PER_METER 像素
+    PIXELS_PER_METER = 100.0
+
+    # 可改参数：大象初始离冰箱多远（单位：米）
+    # 你反馈“太近了”，这里默认调远一些；后续想改只需要改这一行即可。
+    ELEPHANT_INIT_DISTANCE_M = 5
+
+    # 可改参数：每次移动一步的距离（单位：米）
+    # 你希望“步伐增大”，这里默认加大；后续想改只需要改这一行即可。
+    MOVE_STEP_M = 0.2
 
     def __init__(self, render_mode="human"):
         super().__init__()
@@ -31,6 +71,10 @@ class FridgeGameEnv(gym.Env):
         self.SCREEN_HEIGHT = self.DEFAULT_SCREEN_HEIGHT
         self.screen = pygame.display.set_mode((self.SCREEN_WIDTH, self.SCREEN_HEIGHT), pygame.RESIZABLE)
         pygame.display.set_caption("把大象放进冰箱（键盘控制版）")
+
+        # 把“米制参数”转换成像素步长（统一用于上/下/向前移动）
+        # 如果你想改速度，只需要改 MOVE_STEP_M 或 PIXELS_PER_METER
+        self.move_step_px = float(self.MOVE_STEP_M * self.PIXELS_PER_METER)
 
         # 颜色优化：简洁无多余装饰
         self.colors = {
@@ -115,8 +159,14 @@ class FridgeGameEnv(gym.Env):
             width=self.FRIDGE_SIZE[0],
             height=self.FRIDGE_SIZE[1]
         )
+
+        # 需求：大象初始距离冰箱从2.0m改为0.8m
+        # 这里用 x 方向距离表达“离冰箱远近”：让大象在冰箱左侧 0.8m 的位置开始
+        elephant_init_x = float(self.fridge.x - self.ELEPHANT_INIT_DISTANCE_M * self.PIXELS_PER_METER)
+        elephant_init_x = max(self.ELEPHANT_SIZE[0] // 2 + 1, elephant_init_x)
+
         self.elephant = Elephant(
-            x=self.SCREEN_WIDTH * 0.2,
+            x=elephant_init_x,
             y=self.SCREEN_HEIGHT * 0.7,
             width=self.ELEPHANT_SIZE[0],
             height=self.ELEPHANT_SIZE[1]
@@ -211,6 +261,25 @@ class FridgeGameEnv(gym.Env):
         dy = abs(float(self.fridge.y - self.elephant.y))
         return f"冰箱门{door}，大象距冰箱水平{dx:.0f}px/垂直{dy:.0f}px，大象在冰箱内：{inside}"
 
+    def manual_move_xy(self, dx_px: float, dy_px: float):
+        """
+        手动模式专用：允许用“↑↓←→”自由移动大象。
+
+        重要说明：
+        - 这不是强化学习动作空间的一部分（不改变你定义的6维独热动作）。
+        - 仅用于“键盘测试”和“验证环境逻辑”更直观，避免被动作空间限制住。
+        """
+        new_x = float(self.elephant.x + dx_px)
+        new_y = float(self.elephant.y + dy_px)
+
+        # 边界裁剪：不让大象移出窗口
+        half_w = self.ELEPHANT_SIZE[0] // 2
+        half_h = self.ELEPHANT_SIZE[1] // 2
+        new_x = max(half_w + 1, min(self.SCREEN_WIDTH - half_w - 1, new_x))
+        new_y = max(half_h + 1, min(self.SCREEN_HEIGHT - half_h - 1, new_y))
+
+        self.elephant.update_pos(new_x, new_y)
+
     def step(self, action):
         """执行动作"""
         reward = 0.0
@@ -255,13 +324,15 @@ class FridgeGameEnv(gym.Env):
                 reward -= 1.0
 
         elif idx == 2:  # up
-            new_y = self.elephant.y - self.ELEPHANT_MOVE_STEP
+            # 向上：y减小（屏幕坐标系）
+            new_y = self.elephant.y - self.move_step_px
             if new_y - self.ELEPHANT_SIZE[1] // 2 > 0:
                 self.elephant.update_pos(self.elephant.x, new_y)
                 reward += 0.05
 
         elif idx == 5:  # down
-            new_y = self.elephant.y + self.ELEPHANT_MOVE_STEP
+            # 向下：y增大
+            new_y = self.elephant.y + self.move_step_px
             if new_y + self.ELEPHANT_SIZE[1] // 2 < self.SCREEN_HEIGHT:
                 self.elephant.update_pos(self.elephant.x, new_y)
                 reward += 0.05
@@ -269,7 +340,7 @@ class FridgeGameEnv(gym.Env):
         elif idx == 3:  # forward (toward fridge)
             # 约定：向前=沿x方向朝冰箱移动
             direction = 1.0 if self.elephant.x < self.fridge.x else -1.0
-            new_x = self.elephant.x + direction * self.ELEPHANT_MOVE_STEP
+            new_x = self.elephant.x + direction * self.move_step_px
             if (new_x - self.ELEPHANT_SIZE[0] // 2) > 0 and (new_x + self.ELEPHANT_SIZE[0] // 2) < self.SCREEN_WIDTH:
                 self.elephant.update_pos(new_x, self.elephant.y)
                 reward += 0.05
@@ -300,8 +371,12 @@ class FridgeGameEnv(gym.Env):
             self.SCREEN_WIDTH * 0.7,
             self.SCREEN_HEIGHT * 0.7
         )
+
+        # 重置大象到“离冰箱0.8m”的初始位置（与_init_elements一致）
+        elephant_init_x = float(self.fridge.x - self.ELEPHANT_INIT_DISTANCE_M * self.PIXELS_PER_METER)
+        elephant_init_x = max(self.ELEPHANT_SIZE[0] // 2 + 1, elephant_init_x)
         self.elephant.update_pos(
-            self.SCREEN_WIDTH * 0.2,
+            elephant_init_x,
             self.SCREEN_HEIGHT * 0.7
         )
         self.game_phase = 0
