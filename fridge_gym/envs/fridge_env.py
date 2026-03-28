@@ -26,7 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from fridge_gym.elements.fridge import Fridge
 from fridge_gym.elements.elephant import Elephant
-from fridge_gym.utils.render_utils import draw_with_shadow
+from fridge_gym.utils.render_utils import blit_sprite
 
 
 class FridgeGameEnv(gym.Env):
@@ -40,10 +40,10 @@ class FridgeGameEnv(gym.Env):
     """
     metadata = {"render_modes": ["human"], "render_fps": 30}
     # 窗口尺寸
-    DEFAULT_SCREEN_WIDTH = 1200
-    DEFAULT_SCREEN_HEIGHT = 700
-    FRIDGE_SIZE = (200, 180)
-    ELEPHANT_SIZE = (100, 100)
+    DEFAULT_SCREEN_WIDTH = 1280
+    DEFAULT_SCREEN_HEIGHT = 760
+    FRIDGE_SIZE = (300, 270)
+    ELEPHANT_SIZE = (150, 150)
     FRIDGE_INIT_Y_OFFSET = 150
 
     # -----------------------------
@@ -76,24 +76,25 @@ class FridgeGameEnv(gym.Env):
         self.SCREEN_WIDTH = self.DEFAULT_SCREEN_WIDTH
         self.SCREEN_HEIGHT = self.DEFAULT_SCREEN_HEIGHT
         self.screen = pygame.display.set_mode((self.SCREEN_WIDTH, self.SCREEN_HEIGHT), pygame.RESIZABLE)
-        pygame.display.set_caption("把大象放进冰箱（键盘控制版）")
+        pygame.display.set_caption("大象进冰箱")
 
         # 把“米制参数”转换成像素步长（统一用于上/下/向前移动）
         # 如果你想改速度，只需要改 MOVE_STEP_M 或 PIXELS_PER_METER
         self.move_step_px = float(self.move_step_m * self.PIXELS_PER_METER)
 
-        # 颜色优化：简洁无多余装饰
+        # 清淡配色；实际背景在加载素材后可能被衬色覆盖
         self.colors = {
-            "bg": (245, 245, 240),  # 浅米色背景
-            "tip_text": (0, 0, 0),  # 常规提示（纯黑）
-            "hint_text": (0, 100, 0),  # 引导/结束提示
+            "bg": (252, 253, 255),
+            "tip_text": (168, 178, 192),
+            "hint_text": (140, 175, 155),
         }
 
         # 字体初始化
         self._init_font()
 
-        # 资源加载
+        # 资源加载 → 去矩形底/衬色 → 背景与大象素材衬色一致
         self._load_assets()
+        self._prepare_sprites_cutout_and_background()
 
         # 初始化元素
         self._init_elements()
@@ -118,15 +119,15 @@ class FridgeGameEnv(gym.Env):
         self.put_height_threshold_m = 0.8
 
     def _init_font(self):
-        """初始化字体（去掉加粗，字号适中）"""
+        """初始化字体（画面上只保留少量提示，字号偏小、清淡）"""
         try:
-            self.font = pygame.font.SysFont(["SimHei", "Heiti TC"], 30)
-            self.font_small = pygame.font.SysFont(["SimHei", "Heiti TC"], 24)
-            self.font_big = pygame.font.SysFont(["SimHei", "Heiti TC"], 48)
+            self.font = pygame.font.SysFont(["SimHei", "Heiti TC"], 22)
+            self.font_small = pygame.font.SysFont(["SimHei", "Heiti TC"], 18)
+            self.font_big = pygame.font.SysFont(["SimHei", "Heiti TC"], 36)
         except:
-            self.font = pygame.font.Font(None, 30)
-            self.font_small = pygame.font.Font(None, 24)
-            self.font_big = pygame.font.Font(None, 48)
+            self.font = pygame.font.Font(None, 22)
+            self.font_small = pygame.font.Font(None, 18)
+            self.font_big = pygame.font.Font(None, 36)
 
     def _load_assets(self):
         """加载资源"""
@@ -161,6 +162,147 @@ class FridgeGameEnv(gym.Env):
 
             self.fridge_open_img = pygame.Surface(self.FRIDGE_SIZE, pygame.SRCALPHA)
             self.fridge_open_img.fill((0, 255, 0, 180))  # 绿色（打开）
+
+        # 「冰箱门开着 + 大象已在箱内」的合成图（论文/演示用：一眼能看出象在冰箱里）
+        self.fridge_with_elephant_img = None
+        self._has_fridge_elephant_composite = False
+        for name in ("elephant_on.png", "fridge_open_elephant.png"):
+            try:
+                p = os.path.join(ASSETS_PATH, name)
+                self.fridge_with_elephant_img = pygame.image.load(p).convert_alpha()
+                self.fridge_with_elephant_img = pygame.transform.scale(self.fridge_with_elephant_img, self.FRIDGE_SIZE)
+                self._has_fridge_elephant_composite = True
+                break
+            except (FileNotFoundError, pygame.error):
+                continue
+
+    def _matte_rgb_from_corners(self, surf):
+        """
+        若四角的实色相近，视为 JPEG/PNG 的「衬底」，可用于抠图。
+        若角上已明显透明，说明已是抠好的 PNG，返回 None。
+        """
+        if surf is None:
+            return None
+        w, h = surf.get_size()
+        if w < 4 or h < 4:
+            return None
+        corners = [
+            surf.get_at((0, 0)),
+            surf.get_at((w - 1, 0)),
+            surf.get_at((0, h - 1)),
+            surf.get_at((w - 1, h - 1)),
+        ]
+        rgbs = []
+        for c in corners:
+            if len(c) < 4:
+                rgbs.append((c[0], c[1], c[2]))
+                continue
+            if c[3] < 100:
+                return None
+            rgbs.append((c[0], c[1], c[2]))
+        r0, g0, b0 = rgbs[0]
+        for r, g, b in rgbs[1:]:
+            if abs(r - r0) > 35 or abs(g - g0) > 35 or abs(b - b0) > 35:
+                return None
+        return (r0, g0, b0)
+
+    def _cutout_sprite_remove_matte(self, surf, matte_rgb, tolerance=45):
+        """把接近衬底色的像素改为全透明，去掉「一块矩形图」的感觉。"""
+        if surf is None or matte_rgb is None:
+            return
+        br, bg, bb = matte_rgb
+        w, h = surf.get_size()
+
+        def near_matte(c):
+            if len(c) < 4 or c[3] == 0:
+                return True
+            r, g, b = int(c[0]), int(c[1]), int(c[2])
+            return abs(r - br) <= tolerance and abs(g - bg) <= tolerance and abs(b - bb) <= tolerance
+
+        # 若采样点几乎全是衬色（占位纯色图等），跳过以免整张被抠没
+        step = max(4, min(w, h) // 18)
+        non_matte = 0
+        for y in range(0, h, step):
+            for x in range(0, w, step):
+                if not near_matte(surf.get_at((x, y))):
+                    non_matte += 1
+        if non_matte < 6:
+            return
+
+        surf.lock()
+        try:
+            for y in range(h):
+                for x in range(w):
+                    c = surf.get_at((x, y))
+                    if len(c) < 4:
+                        continue
+                    r, g, b, a = int(c[0]), int(c[1]), int(c[2]), int(c[3])
+                    if a == 0:
+                        continue
+                    if abs(r - br) <= tolerance and abs(g - bg) <= tolerance and abs(b - bb) <= tolerance:
+                        surf.set_at((x, y), (r, g, b, 0))
+        finally:
+            surf.unlock()
+
+    def _prepare_sprites_cutout_and_background(self):
+        """每张图用自己的四角衬色做抠图；屏幕背景与大象衬色一致。"""
+        m_el = self._matte_rgb_from_corners(self.elephant_img)
+        if m_el is not None:
+            self.colors["bg"] = m_el
+        else:
+            self._set_solid_bg_from_elephant_image()
+
+        for s in (self.elephant_img, self.fridge_closed_img, self.fridge_open_img):
+            m = self._matte_rgb_from_corners(s)
+            self._cutout_sprite_remove_matte(s, m)
+
+        if self.fridge_with_elephant_img is not None:
+            m2 = self._matte_rgb_from_corners(self.fridge_with_elephant_img)
+            self._cutout_sprite_remove_matte(self.fridge_with_elephant_img, m2)
+
+        # 衬色略向白色偏一点，整体更清淡
+        r, g, b = self.colors["bg"]
+        t = 0.12
+        self.colors["bg"] = (
+            int(r + (255 - r) * t),
+            int(g + (255 - g) * t),
+            int(b + (255 - b) * t),
+        )
+
+    def _set_solid_bg_from_elephant_image(self):
+        """
+        全屏纯色背景：沿大象贴图四边采样不透明像素，取平均 RGB。
+        这样与 `elephant.png` 自带的底色一致，边缘不易看出「贴图感」。
+        若四边全透明（纯抠图），则退回浅灰。
+        """
+        surf = self.elephant_img
+        w, h = surf.get_size()
+        if w < 2 or h < 2:
+            self.colors["bg"] = (252, 253, 255)
+            return
+        samples = []
+
+        def collect(x, y):
+            c = surf.get_at((min(max(0, x), w - 1), min(max(0, y), h - 1)))
+            if len(c) >= 4 and c[3] < 40:
+                return
+            samples.append((c[0], c[1], c[2]))
+
+        step = max(1, min(w, h) // 40)
+        for i in range(0, w, step):
+            collect(i, 0)
+            collect(i, h - 1)
+        for j in range(0, h, step):
+            collect(0, j)
+            collect(w - 1, j)
+
+        if not samples:
+            self.colors["bg"] = (252, 253, 255)
+            return
+        r = sum(p[0] for p in samples) // len(samples)
+        g = sum(p[1] for p in samples) // len(samples)
+        b = sum(p[2] for p in samples) // len(samples)
+        self.colors["bg"] = (r, g, b)
 
     def _init_elements(self):
         """初始化冰箱和大象（居中不遮挡提示）"""
@@ -500,6 +642,21 @@ class FridgeGameEnv(gym.Env):
         self._prev_l1_dist_m = self._l1_dist_m()
         return self._get_obs(), self._get_info()
 
+    def _draw_elephant_inside_fridge_visual(self):
+        """
+        无合成图时的兜底：在冰箱区域内叠一张缩小大象。
+        若存在 assets/elephant_on.png，则优先用整张合成图，不走此路径。
+        """
+        scale = 0.55
+        w = max(32, int(self.ELEPHANT_SIZE[0] * scale))
+        h = max(32, int(self.ELEPHANT_SIZE[1] * scale))
+        small = pygame.transform.smoothscale(self.elephant_img, (w, h))
+        fx = self.fridge.x - self.FRIDGE_SIZE[0] // 2
+        fy = self.fridge.y - self.FRIDGE_SIZE[1] // 2
+        ex = int(fx + (self.FRIDGE_SIZE[0] - w) // 2)
+        ey = int(fy + self.FRIDGE_SIZE[1] // 2 - h // 2 + 8)
+        blit_sprite(self.screen, small, (ex, ey))
+
     def render(self):
         """渲染界面（核心：无加粗字体+纯文字结束提示）"""
         if self.render_mode != "human":
@@ -507,46 +664,44 @@ class FridgeGameEnv(gym.Env):
 
         self.screen.fill(self.colors["bg"])
 
-        # 绘制冰箱和大象
-        fridge_img = self.fridge_open_img if self.fridge.is_open else self.fridge_closed_img
-        draw_with_shadow(
-            fridge_img,
-            (self.fridge.x - self.FRIDGE_SIZE[0] // 2, self.fridge.y - self.FRIDGE_SIZE[1] // 2),
-            self.screen
-        )
-        if (not self.task_complete) and (not self.elephant_inside):
-            draw_with_shadow(
+        fx = self.fridge.x - self.FRIDGE_SIZE[0] // 2
+        fy = self.fridge.y - self.FRIDGE_SIZE[1] // 2
+
+        # 流程：初始门关 → 走近开门 → 放入 → 展示「箱内有大象」→ 关门结束（仅关门冰箱，不见象）
+        if self.task_complete:
+            blit_sprite(self.screen, self.fridge_closed_img, (fx, fy))
+        elif self.elephant_inside and self.fridge.is_open:
+            # 优先使用「冰箱+箱内大象」合成图（如 elephant_on.png）
+            if self._has_fridge_elephant_composite and self.fridge_with_elephant_img is not None:
+                blit_sprite(self.screen, self.fridge_with_elephant_img, (fx, fy))
+            else:
+                blit_sprite(self.screen, self.fridge_open_img, (fx, fy))
+                self._draw_elephant_inside_fridge_visual()
+        else:
+            blit_sprite(
+                self.screen,
+                self.fridge_open_img if self.fridge.is_open else self.fridge_closed_img,
+                (fx, fy),
+            )
+            blit_sprite(
+                self.screen,
                 self.elephant_img,
                 (self.elephant.x - self.ELEPHANT_SIZE[0] // 2, self.elephant.y - self.ELEPHANT_SIZE[1] // 2),
-                self.screen
             )
 
-        # 顶部操作提示（纯黑、常规字体、分行不重叠）
-        op_tips = [
-            "操作说明：W 上 | S 下 | D 向前(靠近冰箱) | O 开门 | P 放入 | C 关门 | R 重置",
-            f"当前阶段：{self.game_phase} | {self.format_state_text()}",
-            f"大象位置：({self.elephant.x:.0f}, {self.elephant.y:.0f}) | 冰箱位置：({self.fridge.x:.0f}, {self.fridge.y:.0f})"
-        ]
-        self.screen.blit(self.font.render(op_tips[0], True, self.colors["tip_text"]), (20, 20))
-        self.screen.blit(self.font_small.render(op_tips[1], True, self.colors["tip_text"]), (20, 70))
-        self.screen.blit(self.font_small.render(op_tips[2], True, self.colors["tip_text"]), (20, 110))
+        # 画面上不堆操作说明，完整按键与流程见 README
+        corner = self.font_small.render("操作见 README", True, self.colors["tip_text"])
+        self.screen.blit(corner, (16, 14))
 
-        # 引导提示（深绿、居中、纯文字）
         if self.elephant_inside and not self.task_complete:
-            hint_text = self.font.render("大象已放入冰箱，请按 C 键关闭冰箱门完成任务", True, self.colors["hint_text"])
-            hint_x = self.SCREEN_WIDTH // 2 - hint_text.get_width() // 2
-            self.screen.blit(hint_text, (hint_x, 160))
+            hint = self.font_small.render("按 C 关门", True, self.colors["hint_text"])
+            self.screen.blit(hint, ((self.SCREEN_WIDTH - hint.get_width()) // 2, self.SCREEN_HEIGHT - 36))
 
         if self.task_complete:
-            success_text1 = self.font_big.render("任务完成！大象已成功关进冰箱", True, self.colors["hint_text"])
-            success_text2 = self.font.render("按 R 键重新开始游戏", True, self.colors["hint_text"])
-            # 文字居中，放在窗口中上部，不遮挡元素
-            text1_x = self.SCREEN_WIDTH // 2 - success_text1.get_width() // 2
-            text1_y = self.SCREEN_HEIGHT // 2 - 50
-            text2_x = self.SCREEN_WIDTH // 2 - success_text2.get_width() // 2
-            text2_y = self.SCREEN_HEIGHT // 2 + 10
-            self.screen.blit(success_text1, (text1_x, text1_y))
-            self.screen.blit(success_text2, (text2_x, text2_y))
+            t1 = self.font_big.render("完成", True, self.colors["hint_text"])
+            t2 = self.font_small.render("按 R 再来一局", True, self.colors["tip_text"])
+            self.screen.blit(t1, ((self.SCREEN_WIDTH - t1.get_width()) // 2, self.SCREEN_HEIGHT // 2 - 40))
+            self.screen.blit(t2, ((self.SCREEN_WIDTH - t2.get_width()) // 2, self.SCREEN_HEIGHT // 2 + 6))
 
         pygame.display.flip()
 

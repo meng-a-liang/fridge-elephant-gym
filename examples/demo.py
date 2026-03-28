@@ -19,15 +19,57 @@ import numpy as np
 from fridge_gym import FridgeGameEnv
 from fridge_gym.agents import RuleBasedAgent, DQNAgent
 
+# 窗口标题保持简短；完整按键与模式说明见 README
+WIN_TITLE = "大象进冰箱"
+
+
+def _greedy_eval_success_rate(
+    agent: DQNAgent,
+    env: FridgeGameEnv,
+    start_options: dict | None,
+    max_steps: int,
+    *,
+    n_runs: int = 12,
+) -> tuple[int, int]:
+    """
+    纯贪心、不写入回放池；起点不扰动（与主窗口按 4 的 reset(options=学习起点) 一致）。
+    用于解释「训练日志里 10/10 成功」与「按 4 表现差」：前者含 epsilon 随机探索。
+    """
+    ok = 0
+    base = dict(start_options or {})
+    for _ in range(int(n_runs)):
+        obs, _info = env.reset(options=base)
+        for _t in range(int(max_steps)):
+            a_idx = agent.act_index(obs, explore=False)
+            obs, _r, term, trunc, info = env.step(agent.onehot(a_idx))
+            if term or trunc:
+                if info.get("task_complete"):
+                    ok += 1
+                break
+    return ok, int(n_runs)
+
+
+def _snapshot_dqn_weights(agent: DQNAgent) -> tuple[dict, dict]:
+    """CPU 克隆，避免末期学崩后无法回到贪心最优解。"""
+    q_sd = {k: v.detach().cpu().clone() for k, v in agent.q.state_dict().items()}
+    qt_sd = {k: v.detach().cpu().clone() for k, v in agent.q_target.state_dict().items()}
+    return q_sd, qt_sd
+
+
+def _load_dqn_weights(agent: DQNAgent, q_sd: dict, qt_sd: dict) -> None:
+    dev = agent.device
+    agent.q.load_state_dict({k: v.to(dev) for k, v in q_sd.items()})
+    agent.q_target.load_state_dict({k: v.to(dev) for k, v in qt_sd.items()})
+
 
 def train_dqn(
-    num_episodes: int = 100,
-    max_steps_per_ep: int = 200,
+    num_episodes: int = 50,
+    max_steps_per_ep: int = 500,
     *,
     elephant_init_distance_m: float | None = None,
     move_step_m: float | None = None,
     start_options: dict | None = None,
-    start_noise_m: float = 0.2,
+    start_noise_m: float = 0.1,
     agent: DQNAgent | None = None,
 ):
     """
@@ -62,6 +104,12 @@ def train_dqn(
         dx_m_est = abs((fridge_x - float(x0)) / env.PIXELS_PER_METER)
         step_m = max(1e-6, float(env.move_step_m))
         adaptive_max_steps = max(adaptive_max_steps, int(dx_m_est / step_m) + 120)
+
+    # DQN 末期仍会从回放池里抽到早期烂样本，可能把 Q 网「学崩」；按「纯贪心评估」保留最佳权重
+    best_greedy_ok: int | None = None
+    best_q_sd: dict | None = None
+    best_qt_sd: dict | None = None
+    best_snapshot_ep = 0
 
     for ep in range(1, num_episodes + 1):
         # 关键改动：训练起点做“随机扰动”（domain randomization）
@@ -116,10 +164,40 @@ def train_dqn(
         if ep % 10 == 0:
             avg_r = sum(reward_history[-10:]) / min(10, len(reward_history))
             succ10 = sum(success_history[-10:])
+            g_ok, g_n = _greedy_eval_success_rate(
+                agent, env, start_options, adaptive_max_steps, n_runs=12
+            )
             print(
                 f"[DQN训练] Episode {ep}/{num_episodes} | 最近10局平均回报：{avg_r:.2f} | 最近10局成功：{succ10}/10"
                 + (f" | 最近一次loss：{last_loss:.4f}" if last_loss is not None else " | loss暂不可用（经验不足）")
             )
+            print(
+                f"         └ 纯贪心评估（与按4一致、起点无扰动）：{g_ok}/{g_n} 局成功。"
+                " 若此处明显低于上行，说明策略仍依赖探索噪声，可多训练或降低 epsilon_end。"
+            )
+            if best_greedy_ok is None:
+                if g_ok > 0:
+                    best_greedy_ok = g_ok
+                    best_q_sd, best_qt_sd = _snapshot_dqn_weights(agent)
+                    best_snapshot_ep = ep
+            elif g_ok > best_greedy_ok:
+                best_greedy_ok = g_ok
+                best_q_sd, best_qt_sd = _snapshot_dqn_weights(agent)
+                best_snapshot_ep = ep
+            elif g_ok == best_greedy_ok and g_ok > 0:
+                best_q_sd, best_qt_sd = _snapshot_dqn_weights(agent)
+                best_snapshot_ep = ep
+
+    if best_q_sd is not None and best_qt_sd is not None and best_greedy_ok and best_greedy_ok > 0:
+        _load_dqn_weights(agent, best_q_sd, best_qt_sd)
+        g_chk, g_n2 = _greedy_eval_success_rate(
+            agent, env, start_options, adaptive_max_steps, n_runs=12
+        )
+        print(
+            f"训练收尾：已恢复「纯贪心评估」最佳 checkpoint（约第 {best_snapshot_ep} 轮附近，{best_greedy_ok}/{g_n2}），"
+            "避免最后几轮更新把策略弄崩。"
+        )
+        print(f"         └ 恢复后立刻复测贪心：{g_chk}/{g_n2} 局成功。")
 
     env.close()
     print("========== DQN 训练结束，按 4 键可在主窗口使用“学习后的自动执行”模式 ==========\n")
@@ -145,9 +223,7 @@ def main():
     # - rule_auto  ：规则基自动执行（人写if-else，上来就最优，但不是“学”的）
     # - dqn_eval   ：DQN学习后的执行（先按3训练，再按4切换到这里）
     mode = "manual"  # manual | rule_auto | dqn_eval
-    pygame.display.set_caption(
-        "把大象放进冰箱 | 1手动(↑↓←→,O开门,P放入,C关门) | 2规则自动 | 3学习训练 | 4学习执行"
-    )
+    pygame.display.set_caption(WIN_TITLE)
 
     # 键盘→动作索引映射（强化学习动作空间：open/close/up/forward/put/down）
     # 0=open,1=close,2=up,3=forward,4=put,5=down
@@ -177,9 +253,7 @@ def main():
                 # 数字键切换/触发模式
                 elif event.key == pygame.K_1:
                     mode = "manual"
-                    pygame.display.set_caption(
-                        "把大象放进冰箱 | 手动模式(↑↓←→移动, O开门, P放入, C关门) | 2规则自动 | 3学习训练 | 4学习执行"
-                    )
+                    pygame.display.set_caption(f"{WIN_TITLE} · 手动")
                     print("切换模式 | 手动模式")
                 # K 键：清空DQN学习进度（从零开始学）
                 elif event.key == pygame.K_k:
@@ -187,9 +261,7 @@ def main():
                     dqn_success_count = 0
                     # 保留 dqn_start_options（学习起点）不动：你通常希望“从同一起点重新学”
                     mode = "manual"
-                    pygame.display.set_caption(
-                        "已清空DQN进度 | 1手动调位置 | H保存起点 | 3重新训练(从零) | 4执行"
-                    )
+                    pygame.display.set_caption(f"{WIN_TITLE} · 已清空学习")
                     print("已清空DQN学习进度(K) | 模型参数/经验回放/epsilon进度已重置为初始状态。")
                 # H 键：把当前手动调整的位置，保存为“学习起点”
                 elif event.key == pygame.K_h:
@@ -202,9 +274,7 @@ def main():
                 elif event.key == pygame.K_2:
                     mode = "rule_auto"
                     obs, info = env.reset()
-                    pygame.display.set_caption(
-                        "把大象放进冰箱 | 自动模式(规则基) | 1手动 | 3学习训练 | 4学习执行"
-                    )
+                    pygame.display.set_caption(f"{WIN_TITLE} · 自动")
                     print("切换模式 | 自动模式（规则基）")
                 elif event.key == pygame.K_3:
                     # 启动 DQN 训练（阻塞当前循环，训练结束后返回）
@@ -225,9 +295,7 @@ def main():
                     # 训练结束后：把可视化环境也reset到“同一个学习起点”，保证按4看到的就是你设定的起点
                     obs, info = env.reset(options=dqn_start_options)
                     mode = "manual"
-                    pygame.display.set_caption(
-                        "把大象放进冰箱 | 手动模式(↑↓←→,O,P,C,H保存起点) | 2规则自动 | 3重新训练 | 4学习执行"
-                    )
+                    pygame.display.set_caption(WIN_TITLE)
                 elif event.key == pygame.K_4:
                     if dqn_agent is None:
                         print("提示：当前还没有训练好的DQN模型，请先按 3 启动训练。")
@@ -236,9 +304,7 @@ def main():
                         obs, info = env.reset(options=dqn_start_options)
                         dqn_success_count = 0
                         dqn_eval_steps = 0
-                        pygame.display.set_caption(
-                            "把大象放进冰箱 | 学习模式(DQN执行) | 1手动 | 2规则自动 | 3重新训练"
-                        )
+                        pygame.display.set_caption(f"{WIN_TITLE} · 学习执行")
                         print("切换模式 | 学习后的自动执行（DQN贪心策略，不再随机探索）")
                 # 手动模式下，按O/P/C走“RL动作空间”的那条分支
                 elif (mode == "manual") and (event.key in key_to_action_idx):
@@ -277,9 +343,7 @@ def main():
             pygame.time.delay(60)  # 防止刷屏过快
             if terminated or truncated:
                 mode = "manual"
-                pygame.display.set_caption(
-                    "把大象放进冰箱 | 手动模式(↑↓←→,O,P,C) | 2规则自动 | 3学习训练 | 4学习执行"
-                )
+                pygame.display.set_caption(WIN_TITLE)
                 print("Episode结束 | 自动模式停止，已切回手动模式。按 R 重置可再次运行。")
 
         # 学习后的自动执行模式（DQN）：每帧按学到的Q值贪心选择动作（不再随机）
@@ -304,9 +368,7 @@ def main():
                     # 你希望“最终找到位置结束，转换到重新开始界面”
                     # 所以成功一次就停止DQN执行，切回手动模式，等待你按 R 或重新设置起点再训练/执行。
                     mode = "manual"
-                    pygame.display.set_caption(
-                        "任务完成！| 按 R 重新开始 | 1手动调位置 | H保存起点 | 3继续训练(累积经验) | 4执行"
-                    )
+                    pygame.display.set_caption(f"{WIN_TITLE} · 完成")
                     print("已完成任务 | 已切回手动模式：按 R 重置，或按 1/H/3/4 继续。")
                 else:
                     print("Episode结束 | DQN 本局未完成任务（可按 3 继续累积训练经验）。")
