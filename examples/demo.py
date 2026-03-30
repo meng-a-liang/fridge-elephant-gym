@@ -318,16 +318,18 @@ def main():
                         print("Episode结束 |", "完成" if info.get("task_complete") else "终止")
 
         # 手动模式：支持↑↓←→自由移动（不计入RL动作空间，只用于人类测试）
+        # 为了演示叙事更清晰：先开门(O)再移动大象；门没打开时方向键不生效。
         if mode == "manual":
             keys = pygame.key.get_pressed()
-            if keys[pygame.K_LEFT]:
-                env.manual_move_xy(-env.move_step_px, 0.0)
-            if keys[pygame.K_RIGHT]:
-                env.manual_move_xy(env.move_step_px, 0.0)
-            if keys[pygame.K_UP]:
-                env.manual_move_xy(0.0, -env.move_step_px)
-            if keys[pygame.K_DOWN]:
-                env.manual_move_xy(0.0, env.move_step_px)
+            if env.fridge.is_open:
+                if keys[pygame.K_LEFT]:
+                    env.manual_move_xy(-env.move_step_px, 0.0)
+                if keys[pygame.K_RIGHT]:
+                    env.manual_move_xy(env.move_step_px, 0.0)
+                if keys[pygame.K_UP]:
+                    env.manual_move_xy(0.0, -env.move_step_px)
+                if keys[pygame.K_DOWN]:
+                    env.manual_move_xy(0.0, env.move_step_px)
 
         # 自动模式（规则基）：每帧由智能体输出动作（完全不学习）
         if mode == "rule_auto":
