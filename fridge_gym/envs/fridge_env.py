@@ -42,8 +42,8 @@ class FridgeGameEnv(gym.Env):
     # 窗口尺寸
     DEFAULT_SCREEN_WIDTH = 1280
     DEFAULT_SCREEN_HEIGHT = 760
-    FRIDGE_SIZE = (300, 270)
-    ELEPHANT_SIZE = (150, 150)
+    FRIDGE_SIZE = (500, 370)
+    ELEPHANT_SIZE = (500, 450)
     FRIDGE_INIT_Y_OFFSET = 150
 
     # -----------------------------
@@ -118,13 +118,60 @@ class FridgeGameEnv(gym.Env):
         self.put_distance_threshold_m = 0.8
         self.put_height_threshold_m = 0.8
 
+    @staticmethod
+    def _pick_cjk_font_path():
+        """
+        解析能渲染中文的字体。
+        Windows 上优先直接读 Fonts 目录：先调用 pygame.font.match_font 会在部分环境
+        触发 pygame 内部 TypeError（系统字体表异常项）。非 Windows 再尝试 match_font。
+        """
+        if sys.platform == "win32":
+            windir = os.environ.get("WINDIR", r"C:\Windows")
+            fonts_dir = os.path.join(windir, "Fonts")
+            for fn in ("msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc", "msyh.ttf"):
+                fp = os.path.join(fonts_dir, fn)
+                if os.path.isfile(fp):
+                    return fp
+        for name in (
+            "Microsoft YaHei",
+            "SimHei",
+            "SimSun",
+            "NSimSun",
+            "KaiTi",
+            "DengXian",
+            "PingFang SC",
+            "Heiti TC",
+        ):
+            try:
+                p = pygame.font.match_font(name)
+                if p and isinstance(p, (str, os.PathLike)) and os.path.isfile(p):
+                    return p
+            except (TypeError, OSError, RuntimeError):
+                continue
+        return None
+
     def _init_font(self):
         """初始化字体（画面上只保留少量提示，字号偏小、清淡）"""
+        path = self._pick_cjk_font_path()
+        if path:
+            try:
+                self.font = pygame.font.Font(path, 22)
+                self.font_small = pygame.font.Font(path, 18)
+                self.font_big = pygame.font.Font(path, 36)
+                return
+            except OSError:
+                pass
         try:
-            self.font = pygame.font.SysFont(["SimHei", "Heiti TC"], 22)
-            self.font_small = pygame.font.SysFont(["SimHei", "Heiti TC"], 18)
-            self.font_big = pygame.font.SysFont(["SimHei", "Heiti TC"], 36)
-        except:
+            self.font = pygame.font.SysFont(
+                ["Microsoft YaHei", "SimHei", "SimSun", "Heiti TC", "PingFang SC"], 22
+            )
+            self.font_small = pygame.font.SysFont(
+                ["Microsoft YaHei", "SimHei", "SimSun", "Heiti TC", "PingFang SC"], 18
+            )
+            self.font_big = pygame.font.SysFont(
+                ["Microsoft YaHei", "SimHei", "SimSun", "Heiti TC", "PingFang SC"], 36
+            )
+        except (OSError, TypeError, RuntimeError):
             self.font = pygame.font.Font(None, 22)
             self.font_small = pygame.font.Font(None, 18)
             self.font_big = pygame.font.Font(None, 36)
@@ -207,31 +254,97 @@ class FridgeGameEnv(gym.Env):
         return (r0, g0, b0)
 
     def _cutout_sprite_remove_matte(self, surf, matte_rgb, tolerance=45):
-        """把接近衬底色的像素改为全透明，去掉「一块矩形图」的感觉。"""
+        """
+        抠掉「衬底色背景」。
+
+        关键点：只抠除“与边界连通”的衬底像素（flood fill），避免把主体内部
+        颜色接近衬底的区域误抠成透明洞（例如灰色大象、白色高光）。
+        """
         if surf is None or matte_rgb is None:
             return
         br, bg, bb = matte_rgb
         w, h = surf.get_size()
 
         def near_matte(c):
-            if len(c) < 4 or c[3] == 0:
-                return True
+            if len(c) < 4:
+                return False
+            if int(c[3]) == 0:
+                return False
             r, g, b = int(c[0]), int(c[1]), int(c[2])
             return abs(r - br) <= tolerance and abs(g - bg) <= tolerance and abs(b - bb) <= tolerance
 
-        # 若采样点几乎全是衬色（占位纯色图等），跳过以免整张被抠没
-        step = max(4, min(w, h) // 18)
-        non_matte = 0
+        # 如果边界大多不是衬色，说明不该抠（可能已是透明PNG或背景复杂）
+        edge_samples = []
+        step = max(2, min(w, h) // 40)
+        for x in range(0, w, step):
+            edge_samples.append(surf.get_at((x, 0)))
+            edge_samples.append(surf.get_at((x, h - 1)))
         for y in range(0, h, step):
-            for x in range(0, w, step):
-                if not near_matte(surf.get_at((x, y))):
-                    non_matte += 1
-        if non_matte < 6:
+            edge_samples.append(surf.get_at((0, y)))
+            edge_samples.append(surf.get_at((w - 1, y)))
+        if not edge_samples:
             return
+        matte_edge = sum(1 for c in edge_samples if near_matte(c))
+        if matte_edge / float(len(edge_samples)) < 0.55:
+            return
+
+        # Flood fill：从四条边界开始，把与边界连通的衬色像素全部置透明
+        from collections import deque
+
+        q = deque()
+        seen = set()
+
+        def push(px, py):
+            if px < 0 or py < 0 or px >= w or py >= h:
+                return
+            key = (px, py)
+            if key in seen:
+                return
+            seen.add(key)
+            q.append(key)
+
+        for x in range(w):
+            push(x, 0)
+            push(x, h - 1)
+        for y in range(h):
+            push(0, y)
+            push(w - 1, y)
 
         surf.lock()
         try:
-            for y in range(h):
+            while q:
+                x, y = q.popleft()
+                c = surf.get_at((x, y))
+                if not near_matte(c):
+                    continue
+                r, g, b, a = int(c[0]), int(c[1]), int(c[2]), int(c[3])
+                if a != 0:
+                    surf.set_at((x, y), (r, g, b, 0))
+                push(x + 1, y)
+                push(x - 1, y)
+                push(x, y + 1)
+                push(x, y - 1)
+        finally:
+            surf.unlock()
+
+    @staticmethod
+    def _remove_soft_shadow_near_feet(surf: pygame.Surface, *, y_start_ratio: float = 0.55):
+        """
+        去掉大象脚底常见的“半透明投影圈”。
+
+        这类阴影通常表现为：靠近底部的一圈灰/黑像素，alpha 不满（半透明），
+        不属于背景衬色，因此不会被抠背景逻辑清掉。
+        """
+        if surf is None:
+            return
+        w, h = surf.get_size()
+        if w <= 2 or h <= 2:
+            return
+        y0 = int(max(0, min(h - 1, int(h * float(y_start_ratio)))))
+
+        surf.lock()
+        try:
+            for y in range(y0, h):
                 for x in range(w):
                     c = surf.get_at((x, y))
                     if len(c) < 4:
@@ -239,8 +352,94 @@ class FridgeGameEnv(gym.Env):
                     r, g, b, a = int(c[0]), int(c[1]), int(c[2]), int(c[3])
                     if a == 0:
                         continue
-                    if abs(r - br) <= tolerance and abs(g - bg) <= tolerance and abs(b - bb) <= tolerance:
-                        surf.set_at((x, y), (r, g, b, 0))
+                    # 经验阈值：阴影一般“偏暗 + 半透明”
+                    if a < 245:
+                        lum = (r + g + b) / 3.0
+                        if lum < 180:
+                            surf.set_at((x, y), (r, g, b, 0))
+        finally:
+            surf.unlock()
+
+    @staticmethod
+    def _remove_bg_tinted_shadow_by_floodfill(
+        surf: pygame.Surface,
+        bg_rgb: tuple[int, int, int],
+        *,
+        y_start_ratio: float = 0.55,
+        near_bg_tol: int = 38,
+        must_be_darker_by: float = 6.0,
+    ):
+        """
+        去除“脚底一圈浅色阴影/地面投影”（常见于 AI 生成图）：它往往是**不透明**的浅青色，
+        颜色接近背景但略深，因此需要按“接近背景色”来抠，而不能只看 alpha。
+
+        做法：从透明区域出发做 flood fill，只处理底部区域；将满足条件的像素设为透明。
+        这样不会误伤主体内部区域（主体通常不与透明区域连通）。
+        """
+        if surf is None:
+            return
+        w, h = surf.get_size()
+        if w <= 2 or h <= 2:
+            return
+        y0 = int(max(0, min(h - 1, int(h * float(y_start_ratio)))))
+        br, bg, bb = int(bg_rgb[0]), int(bg_rgb[1]), int(bg_rgb[2])
+        bg_lum = (br + bg + bb) / 3.0
+
+        def is_near_bg(c) -> bool:
+            if len(c) < 4:
+                return False
+            if int(c[3]) == 0:
+                return False
+            r, g, b = int(c[0]), int(c[1]), int(c[2])
+            if abs(r - br) > near_bg_tol or abs(g - bg) > near_bg_tol or abs(b - bb) > near_bg_tol:
+                return False
+            lum = (r + g + b) / 3.0
+            return lum <= (bg_lum - float(must_be_darker_by))
+
+        from collections import deque
+
+        q = deque()
+        seen = set()
+
+        def push(x, y):
+            if x < 0 or y < y0 or x >= w or y >= h:
+                return
+            key = (x, y)
+            if key in seen:
+                return
+            seen.add(key)
+            q.append(key)
+
+        # 从“透明边界”启动：底部区域中，紧邻透明背景的阴影会被扫到
+        surf.lock()
+        try:
+            for x in range(w):
+                if int(surf.get_at((x, h - 1))[3]) == 0:
+                    push(x, h - 1)
+            for y in range(y0, h):
+                if int(surf.get_at((0, y))[3]) == 0:
+                    push(0, y)
+                if int(surf.get_at((w - 1, y))[3]) == 0:
+                    push(w - 1, y)
+
+            while q:
+                x, y = q.popleft()
+                c = surf.get_at((x, y))
+                a = int(c[3]) if len(c) >= 4 else 255
+                if a == 0:
+                    # 透明区：继续扩展，寻找相邻的“接近背景的阴影像素”
+                    push(x + 1, y)
+                    push(x - 1, y)
+                    push(x, y + 1)
+                    push(x, y - 1)
+                    continue
+                if is_near_bg(c):
+                    r, g, b = int(c[0]), int(c[1]), int(c[2])
+                    surf.set_at((x, y), (r, g, b, 0))
+                    push(x + 1, y)
+                    push(x - 1, y)
+                    push(x, y + 1)
+                    push(x, y - 1)
         finally:
             surf.unlock()
 
@@ -252,13 +451,27 @@ class FridgeGameEnv(gym.Env):
         else:
             self._set_solid_bg_from_elephant_image()
 
-        for s in (self.elephant_img, self.fridge_closed_img, self.fridge_open_img):
+        # 抠图：使用“边界连通抠衬色”的方式，既能去掉矩形背景/水印字样，
+        # 又不容易把主体内部浅色区域抠成洞。
+        m = self._matte_rgb_from_corners(self.elephant_img)
+        self._cutout_sprite_remove_matte(self.elephant_img, m, tolerance=40)
+        self._remove_soft_shadow_near_feet(self.elephant_img, y_start_ratio=0.55)
+        self._remove_bg_tinted_shadow_by_floodfill(
+            self.elephant_img,
+            self.colors["bg"],
+            y_start_ratio=0.62,
+            near_bg_tol=62,
+            must_be_darker_by=0.8,
+        )
+
+        # 冰箱贴图的背景更容易出现压缩噪点/水印残边，容差略大一些更干净
+        for s in (self.fridge_closed_img, self.fridge_open_img):
             m = self._matte_rgb_from_corners(s)
-            self._cutout_sprite_remove_matte(s, m)
+            self._cutout_sprite_remove_matte(s, m, tolerance=70)
 
         if self.fridge_with_elephant_img is not None:
             m2 = self._matte_rgb_from_corners(self.fridge_with_elephant_img)
-            self._cutout_sprite_remove_matte(self.fridge_with_elephant_img, m2)
+            self._cutout_sprite_remove_matte(self.fridge_with_elephant_img, m2, tolerance=70)
 
         # 衬色略向白色偏一点，整体更清淡
         r, g, b = self.colors["bg"]
@@ -698,10 +911,8 @@ class FridgeGameEnv(gym.Env):
             self.screen.blit(hint, ((self.SCREEN_WIDTH - hint.get_width()) // 2, self.SCREEN_HEIGHT - 36))
 
         if self.task_complete:
-            t1 = self.font_big.render("完成", True, self.colors["hint_text"])
-            t2 = self.font_small.render("按 R 再来一局", True, self.colors["tip_text"])
-            self.screen.blit(t1, ((self.SCREEN_WIDTH - t1.get_width()) // 2, self.SCREEN_HEIGHT // 2 - 40))
-            self.screen.blit(t2, ((self.SCREEN_WIDTH - t2.get_width()) // 2, self.SCREEN_HEIGHT // 2 + 6))
+            t2 = self.font_small.render("", True, self.colors["tip_text"])
+            self.screen.blit(t2, ((self.SCREEN_WIDTH - t2.get_width()) // 2, self.SCREEN_HEIGHT // 2 - 6))
 
         pygame.display.flip()
 

@@ -1,94 +1,83 @@
-# 把大象放进冰箱（Fridge Elephant Gym）
-
-基于 **Gymnasium / Gym** 的强化学习实验环境：智能体通过离散动作完成「开门 → 靠近 → 放入 → 关门」流程。附带 **pygame** 可视化、**规则基智能体**与 **DQN** 示例，便于课程作业与论文实验复现。
-
-## 功能概览
-
-| 内容 | 说明 |
-|------|------|
-| 环境 | `FridgeGameEnv`：状态（门、相对距离米制、是否在箱内）、6 维独热动作、奖励与阶段提示 |
-| 智能体 | `RuleBasedAgent`（可解释基线）、`DQNAgent`（经验回放 + 目标网络） |
-| 演示 | `examples/demo.py`：手动 / 规则自动 / DQN 训练与执行（见下方按键） |
-| 界面 | 纯色清淡背景（大象图衬色略提亮）；**开门且已放入**用合成图或箱内小象；**关门完成**后仅关门冰箱；**画面上几乎不写长说明**（详见 README） |
-
-## 环境依赖
-
+# Fridge Elephant Gym
+A lightweight **Gymnasium/Gym-compatible** reinforcement learning benchmark for **dependency-constrained sequential tasks**.
+The task follows a strict workflow:
+**Open door → Approach/Align → Put in → Close door**
+This repository is designed for reproducible AGI-oriented benchmarking and educational RL experiments.
+---
+## Highlights
+- **Environment**: `FridgeGameEnv` with 4D observations and 6D one-hot actions
+- **Baselines**:
+  - `RuleBasedAgent` (interpretable deterministic policy)
+  - `DQNAgent` (replay buffer + target network + epsilon-greedy)
+- **Evaluation**:
+  - separates behavior-policy success and greedy-policy success
+  - supports best-checkpoint restoration based on greedy performance
+- **Visualization**:
+  - pygame-based human mode for debugging/demo
+  - headless mode for efficient training
+---
+## Observation and Action
+### Observation (4D)
+\[
+[door\_open,\ dx(m),\ dy(m),\ elephant\_inside]
+\]
+- `door_open`: 0/1
+- `dx`, `dy`: signed relative offsets in meters
+- `elephant_inside`: 0/1
+### Action (6D one-hot)
+- `[1,0,0,0,0,0]`: open
+- `[0,1,0,0,0,0]`: close
+- `[0,0,1,0,0,0]`: up
+- `[0,0,0,1,0,0]`: forward (toward fridge)
+- `[0,0,0,0,1,0]`: put
+- `[0,0,0,0,0,1]`: down
+---
+## Install
 ```bash
 pip install -r requirements.txt
-```
+Main dependencies: gymnasium (or gym), pygame, numpy, torch (for DQN).
 
-主要依赖：`gymnasium`（或 `gym`）、`pygame`、`numpy`、`torch`（仅 DQN 训练需要）。
-
-## 运行
-
-```bash
+Run
 python examples/demo.py
-```
+Demo controls
+1: manual mode
+2: rule-based auto mode
+3: DQN training
+4: DQN greedy execution
+H: save current manual position as training/eval start
+K: clear DQN progress
+R: reset episode
+Manual test keys:
 
-### 游戏窗口里的字
-
-窗口标题与画面刻意保持简短（例如「大象进冰箱」「· 手动」等）。画面角落只有 **「操作见 README」**；大象进箱后提示 **「按 C 关门」**；完成后 **「完成」「按 R 再来一局」**。**完整流程、模式与按键以本节为准。**
-
-### 按键一览（`examples/demo.py`）
-
-**模式切换**
-
-| 按键 | 作用 |
-|------|------|
-| `1` | 手动模式 |
-| `2` | 规则基自动（从默认开局重置一局） |
-| `3` | DQN 训练（阻塞，日志在控制台；可在同一模型上多次累积训练） |
-| `4` | DQN 贪心执行（需先训练；使用 `H` 保存的学习起点） |
-| `K` | 清空 DQN（网络与经验回放等恢复初始；切回手动） |
-| `R` | 重置当前一局 |
-
-**手动模式：移动与任务动作**
-
-| 按键 | 作用 |
-|------|------|
-| `↑` `↓` `←` `→` | 平移大象（便于试玩；**不计入** Gym 的 6 维动作空间） |
-| `O` | 开门（RL 动作：open） |
-| `C` | 关门（close） |
-| `D` | 向前、靠近冰箱（forward） |
-| `P` | 放入（put） |
-| `H` | 将当前大象位置保存为 **DQN 训练/执行** 的起点（含门为关） |
-
-训练前若未按 `H`，在手动模式下按 `3` 时会自动用当前位置作为学习起点。
-
-## 项目结构
-
-```
+Arrow keys: move elephant (manual debug only, not RL action space)
+O: open
+C: close
+D: forward
+P: put
+Reproducibility Notes
+Keep training env and visualization env parameters consistent.
+Report behavior-policy and greedy-policy metrics separately.
+Use multiple seeds for stable comparisons.
+Project Structure
 fridge_gym/
-  elements/       # 冰箱、大象实体
-  envs/           # FridgeGameEnv
-  agents/         # 规则基、DQN
-  utils/          # 渲染辅助
+  envs/         # FridgeGameEnv
+  agents/       # Rule-based and DQN agents
+  elements/     # Entity definitions
+  utils/        # Rendering helpers
 examples/
-  demo.py         # 交互主程序
-```
+  demo.py       # Interactive demo and training entry
+docs/
+  THESIS_CORE_OUTLINE.md
+  DOUBAO_THESIS_PROMPT.md
+Paper Submission Context
+This project is used for preparing an AGI conference paper draft under LNCS format.
 
-## 状态与动作（与代码一致）
+CFP reference: AGI-26 Call for Papers
 
-- **观测（示例）**：`[门是否开, dx(m), dy(m), 是否在箱内]`（详见 `fridge_env.py` 中 `_get_obs`）
-- **动作**：6 维 one-hot — 开门、关门、上、前、放入、下
-
-## 资源与界面
-
-将图片放在项目根目录 `assets/`：
-
-| 文件 | 作用 |
-|------|------|
-| `elephant.png` | 场景里移动的大象 |
-| `fridge_closed.png` | 关门状态（初始、任务完成后） |
-| `fridge_open.png` | 开门、大象尚未放入时 |
-| `elephant_on.png`（或 `fridge_open_elephant.png`） | **门开且已放入**：整张图展示「冰箱内可见大象」 |
-
-缺失时用色块占位；无合成图时会在开门冰箱上叠缩小象作为兜底。
-
-**背景**：全屏**纯色**。若大象图四角为统一衬色（常见 JPG/白底 PNG），程序会**自动抠掉该衬色**并把该 RGB 设为窗口背景，物体边缘与背景融为一体；已是透明 PNG 则保留 Alpha。绘制**无阴影**，减少「贴图卡片」感。
-
----
-
-## 许可证与引用
-
-若论文中使用本仓库，请在致谢或脚注中注明代码仓库地址与版本（commit 或 tag）。
+Citation
+@misc{fridge_elephant_gym_2026,
+  title={Fridge Elephant Gym: A Dependency-Constrained RL Benchmark},
+  author={Rongbo Gao},
+  year={2026},
+  note={GitHub repository}
+}
