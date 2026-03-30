@@ -73,11 +73,3 @@ Paper Submission Context
 This project is used for preparing an AGI conference paper draft under LNCS format.
 
 CFP reference: AGI-26 Call for Papers
-
-Citation
-@misc{fridge_elephant_gym_2026,
-  title={Fridge Elephant Gym: A Dependency-Constrained RL Benchmark},
-  author={Rongbo Gao},
-  year={2026},
-  note={GitHub repository}
-}
