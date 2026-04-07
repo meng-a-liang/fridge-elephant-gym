@@ -86,7 +86,7 @@ class DQNAgent(BaseAgent):
     - 直接选Q值最大的动作（不探索）
     """
 
-    def __init__(self, obs_dim: int = 4, n_actions: int = 6, cfg: Optional[DQNConfig] = None, device: str = "cpu"):
+    def __init__(self, obs_dim: int = 5, n_actions: int = 6, cfg: Optional[DQNConfig] = None, device: str = "cpu"):
         self.obs_dim = int(obs_dim)
         self.n_actions = int(n_actions)
         self.cfg = cfg or DQNConfig()

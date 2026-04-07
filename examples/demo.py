@@ -3,7 +3,7 @@
 demo.py
 =================
 这个脚本提供三种模式，帮助你直观理解“规则基”和“强化学习(DQN)学习模式”的区别：
-1. 手动模式：键盘直接控制（↑↓←→移动，O开门，P放入，C关门）
+1. 手动模式：键盘直接控制（↑↓←→移动，O开门，C关门，W/A/S/D 对应RL移动动作）
 2. 自动模式（规则基）：调用 RuleBasedAgent，按人写好的 if-else 执行最优路径
 3. 学习模式（DQN）：按 3 键启动训练（有探索/试错），训练后按 4 键用“学到的策略”自动执行
 
@@ -142,7 +142,7 @@ def train_dqn(
 
             # 3) 将这一步的经验存入回放池
             # 训练稳定性：奖励截断（但不要把“关门成功”的关键大奖励截得太小）
-            # 之前用[-5,5]会把 put/close 的关键奖励压扁，DQN容易学到“会进但不关门”。
+            # 之前用[-5,5]会把 close 的关键奖励压扁，DQN容易学到“对齐后不关门”。
             clipped_reward = float(max(-20.0, min(20.0, float(reward))))
             agent.push_transition(obs, action_idx, clipped_reward, next_obs, done)
 
@@ -225,13 +225,15 @@ def main():
     mode = "manual"  # manual | rule_auto | dqn_eval
     pygame.display.set_caption(WIN_TITLE)
 
-    # 键盘→动作索引映射（强化学习动作空间：open/close/up/forward/put/down）
-    # 0=open,1=close,2=up,3=forward,4=put,5=down
+    # 键盘→动作索引映射（强化学习动作空间：open/close/up/down/left/right）
+    # 0=open,1=close,2=up,3=down,4=left,5=right
     key_to_action_idx = {
         pygame.K_o: 0,  # O: open
         pygame.K_c: 1,  # C: close
-        pygame.K_d: 3,  # D: forward
-        pygame.K_p: 4,  # P: put
+        pygame.K_w: 2,  # W: up
+        pygame.K_s: 3,  # S: down
+        pygame.K_a: 4,  # A: left
+        pygame.K_d: 5,  # D: right
     }
 
     # 主循环（只负责显示 & 模式切换 & 执行当前模式一步）
@@ -306,7 +308,7 @@ def main():
                         dqn_eval_steps = 0
                         pygame.display.set_caption(f"{WIN_TITLE} · 学习执行")
                         print("切换模式 | 学习后的自动执行（DQN贪心策略，不再随机探索）")
-                # 手动模式下，按O/P/C走“RL动作空间”的那条分支
+                # 手动模式下，按 O/C/W/A/S/D 走“RL动作空间”的那条分支
                 elif (mode == "manual") and (event.key in key_to_action_idx):
                     action_idx = key_to_action_idx[event.key]
                     action_onehot = rule_agent.onehot(action_idx)
